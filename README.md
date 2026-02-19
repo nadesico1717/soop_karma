@@ -7,51 +7,12 @@ import {
   Share2, Info, ArrowRight
 } from 'lucide-react';
 
-// --- Firebase Imports ---
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  signInWithCustomToken, // 미리보기 환경용 인증 추가
-  onAuthStateChanged 
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  setDoc,
-  onSnapshot
-} from 'firebase/firestore';
-
-// --- ⚠️ GitHub Pages 배포 설정 영역 ⚠️ ---
-// 1. Firebase 콘솔 -> 프로젝트 설정 -> 내 앱 -> SDK 설정 및 구성의 내용을 아래에 복사하세요.
-const ghPagesConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId: "YOUR_APP_ID"
-};
-
-// 2. 환경 감지 및 설정 선택
-// Canvas 미리보기 환경에서는 __firebase_config를 사용하고,
-// GitHub Pages 등 외부 환경에서는 위에서 정의한 ghPagesConfig를 사용합니다.
-const firebaseConfig = typeof __firebase_config !== 'undefined'
-  ? JSON.parse(__firebase_config)
-  : ghPagesConfig;
-
-// 3. 앱 식별자 (데이터베이스에 저장될 최상위 폴더명, 원하는 영문으로 변경 가능)
-const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'my-karma-dashboard';
+// API 키나 Firebase 관련 import가 모두 제거되었습니다.
+// 브라우저의 localStorage를 데이터베이스로 사용합니다.
 
 const App = () => {
-  // --- 1. Firebase Initialization & Global Vars ---
-  const [user, setUser] = useState(null);
-  const [db, setDb] = useState(null);
-  const [isOnline, setIsOnline] = useState(true);
+  // --- 1. Global State ---
+  const [isOnline, setIsOnline] = useState(true); // 로컬 모드이므로 항상 온라인
 
   // --- 2. Initial Data & State ---
   const initialCategories = [
@@ -99,16 +60,10 @@ const App = () => {
   const [isViewerAdding, setIsViewerAdding] = useState(false);
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, viewerId: null, viewerName: null });
 
-  // --- 3. Firebase Setup & URL Parsing ---
+  // --- 3. LocalStorage Logic & Initialization ---
+  
+  // URL 해시 체크 (채널 ID 설정)
   useEffect(() => {
-    // 1. Firebase Init
-    const app = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const firestore = getFirestore(app);
-    
-    setDb(firestore);
-
-    // 2. Hash Check logic (To handle refresh and deep links)
     const checkHash = () => {
       const hash = window.location.hash.replace('#', '');
       if (hash) {
@@ -117,114 +72,74 @@ const App = () => {
         setIsLanding(false);
       }
     };
-
     checkHash();
     window.addEventListener('hashchange', checkHash);
-
-    // 3. Authentication (Hybrid: Preview or Production)
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          // Preview environment with custom token
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          // GitHub environment with anonymous login
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth Error:", error);
-        setIsOnline(false);
-      }
-    };
-
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsOnline(!!u);
-    });
-
-    return () => {
-      unsubscribe();
-      window.removeEventListener('hashchange', checkHash);
-    };
+    return () => window.removeEventListener('hashchange', checkHash);
   }, []);
 
-  // --- 4. Firestore Data Listeners ---
+  // 데이터 불러오기 (Load)
   useEffect(() => {
-    if (!user || !db || !channelId) return;
+    if (!channelId) return;
+    
+    const storageKey = `karma-dashboard-${channelId}`;
+    const savedData = localStorage.getItem(storageKey);
 
-    // 1. Karmas Listener
-    const karmasRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'karmas');
-    const unsubKarmas = onSnapshot(karmasRef, (snapshot) => {
-      const data = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .filter(item => item.channelId === channelId);
-      data.sort((a, b) => b.createdAt - a.createdAt);
-      setKarmas(data);
-    }, (err) => console.error("Firestore Error:", err));
+    if (savedData) {
+      try {
+        const parsed = JSON.parse(savedData);
+        setKarmas(parsed.karmas || []);
+        setViewers(parsed.viewers || []);
+        setCategories(parsed.categories || initialCategories);
+        setStreamerName(parsed.settings?.streamerName || channelId);
+        setStoredPassword(parsed.settings?.password || '0000');
+      } catch (e) {
+        console.error("데이터 로드 실패:", e);
+      }
+    } else {
+      // 초기 데이터 설정
+      setStreamerName(channelId);
+      setStoredPassword('0000');
+      setCategories(initialCategories);
+    }
+  }, [channelId]);
 
-    // 2. Viewers Listener
-    const viewersRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'viewers');
-    const unsubViewers = onSnapshot(viewersRef, (snapshot) => {
-      const data = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .filter(item => item.channelId === channelId);
-      setViewers(data);
-    });
+  // 데이터 저장하기 (Save) - 상태가 변경될 때마다 자동 저장
+  useEffect(() => {
+    if (!channelId) return;
 
-    // 3. Categories Listener
-    const catsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'categories');
-    const unsubCats = onSnapshot(catsRef, (snapshot) => {
-      const data = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .filter(item => item.channelId === channelId);
-      if (data.length > 0) setCategories(data);
-      else setCategories(initialCategories);
-    });
-
-    // 4. Settings Listener (Channel Settings)
-    const settingsRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'channel_settings');
-    const unsubSettings = onSnapshot(settingsRef, (snapshot) => {
-        const mySettings = snapshot.docs.find(d => d.id === channelId);
-        if (mySettings) {
-            const data = mySettings.data();
-            if (data.streamerName) setStreamerName(data.streamerName);
-            if (data.password) setStoredPassword(data.password);
-        } else {
-            setStreamerName(channelId);
-            setStoredPassword('0000');
-        }
-    });
-
-    return () => {
-      unsubKarmas();
-      unsubViewers();
-      unsubCats();
-      unsubSettings();
+    const storageKey = `karma-dashboard-${channelId}`;
+    const dataToSave = {
+      karmas,
+      viewers,
+      categories,
+      settings: {
+        streamerName,
+        password: storedPassword
+      }
     };
-  }, [user, db, channelId]);
+    
+    localStorage.setItem(storageKey, JSON.stringify(dataToSave));
+  }, [karmas, viewers, categories, streamerName, storedPassword, channelId]);
 
-  // --- 5. Handlers ---
+
+  // --- 5. Handlers (Local State Updates) ---
   const handleChannelSubmit = (e) => {
     e.preventDefault();
     if (!landingInput.trim()) return;
     const cleanId = landingInput.trim(); 
     setChannelId(cleanId);
     setIsLanding(false);
-    // Update hash for sharing
     window.location.hash = encodeURIComponent(cleanId);
   };
 
-  const updateSettings = async (field, value) => {
-    if (!db || !user || !channelId) return;
-    await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'channel_settings', channelId), { 
-      [field]: value 
-    }, { merge: true });
+  const updateSettings = (field, value) => {
+    if (field === 'streamerName') setStreamerName(value);
+    if (field === 'password') setStoredPassword(value);
   };
 
-  const addKarma = async (e) => {
+  const addKarma = (e) => {
     e.preventDefault();
-    if (!newKarma.trim() || !db || !user) return;
+    if (!newKarma.trim()) return;
     
     let finalViewer = '익명';
     if (selectedViewer !== 'All') {
@@ -234,7 +149,8 @@ const App = () => {
     }
 
     const countVal = parseInt(newCount) || 1;
-    await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'karmas'), {
+    const newItem = {
+      id: Date.now().toString(), // 로컬 ID 생성
       channelId: channelId,
       title: newKarma,
       category: newCategory,
@@ -243,55 +159,62 @@ const App = () => {
       viewer: finalViewer,
       completed: false,
       createdAt: Date.now()
-    });
+    };
+
+    setKarmas(prev => [newItem, ...prev]);
     setNewKarma('');
     setNewCount(1);
     setTargetViewerInput('');
   };
 
-  const deleteKarma = async (id) => {
-    if (!db || !user) return;
-    await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'karmas', id));
+  const deleteKarma = (id) => {
+    setKarmas(prev => prev.filter(item => item.id !== id));
   };
 
-  const toggleComplete = async (item) => {
-    if (!isAdmin || !db || !user) return;
-    await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'karmas', item.id), {
-      completed: !item.completed
-    });
+  const toggleComplete = (item) => {
+    if (!isAdmin) return;
+    setKarmas(prev => prev.map(k => 
+      k.id === item.id ? { ...k, completed: !k.completed } : k
+    ));
   };
 
-  const adjustCount = async (item, delta) => {
-    if (!isAdmin || !db || !user) return;
-    const nextCount = Math.max(0, item.count + delta);
-    await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'karmas', item.id), {
-      count: nextCount,
-      completed: nextCount === 0
-    });
+  const adjustCount = (item, delta) => {
+    if (!isAdmin) return;
+    setKarmas(prev => prev.map(k => {
+      if (k.id === item.id) {
+        const nextCount = Math.max(0, k.count + delta);
+        return { ...k, count: nextCount, completed: nextCount === 0 };
+      }
+      return k;
+    }));
   };
 
-  const saveEdit = async (id) => {
-    if (!db || !user) return;
+  const saveEdit = (id) => {
     const nextCount = parseInt(editForm.count) || 0;
-    await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'karmas', id), {
-      title: editForm.title,
-      count: nextCount,
-      initialCount: parseInt(editForm.initialCount) || 1,
-      viewer: editForm.viewer || '익명',
-      completed: nextCount === 0
-    });
+    setKarmas(prev => prev.map(k => 
+      k.id === id ? {
+        ...k,
+        title: editForm.title,
+        count: nextCount,
+        initialCount: parseInt(editForm.initialCount) || 1,
+        viewer: editForm.viewer || '익명',
+        completed: nextCount === 0
+      } : k
+    ));
     setEditingId(null);
   };
 
-  const addViewer = async (e) => {
+  const addViewer = (e) => {
     e.preventDefault();
-    if (!newViewerName.trim() || !db || !user) return;
+    if (!newViewerName.trim()) return;
     if (!viewers.some(v => v.name === newViewerName.trim())) {
-      await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'viewers'), {
+      const newViewer = {
+        id: Date.now().toString(),
         channelId: channelId,
         name: newViewerName.trim(),
         url: newViewerUrl.trim()
-      });
+      };
+      setViewers(prev => [...prev, newViewer]);
     } else {
       alert('이미 존재하는 시청자입니다.');
     }
@@ -300,31 +223,30 @@ const App = () => {
     setIsViewerAdding(false);
   };
 
-  const confirmDeleteViewer = async () => {
-    if (!db || !user) return;
+  const confirmDeleteViewer = () => {
     const { viewerId, viewerName } = deleteModal;
     if (viewerId) {
-      await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'viewers', viewerId));
+      setViewers(prev => prev.filter(v => v.id !== viewerId));
       if (selectedViewer === viewerName) setSelectedViewer('All');
     }
     setDeleteModal({ isOpen: false, viewerId: null, viewerName: null });
   };
 
-  const addCategory = async () => {
-    if (!customCatName.trim() || !db || !user) return;
-    await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'categories'), {
+  const addCategory = () => {
+    if (!customCatName.trim()) return;
+    const newCat = {
+      id: `custom-${Date.now()}`,
       channelId: channelId,
       label: customCatName,
       color: 'teal',
-      icon: 'Tag',
-      id: `custom-${Date.now()}`
-    });
+      icon: 'Tag'
+    };
+    setCategories(prev => [...prev, newCat]);
     setCustomCatName('');
   };
 
-  const deleteCategory = async (catId) => {
-    if (!db || !user) return;
-    await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'categories', catId));
+  const deleteCategory = (catId) => {
+    setCategories(prev => prev.filter(c => c.id !== catId));
     if (newCategory === catId) setNewCategory('Game');
   };
 
@@ -354,7 +276,6 @@ const App = () => {
   const copyShareLink = () => {
     const url = window.location.href;
     
-    // Fallback function using execCommand
     const copyFallback = () => {
       const textArea = document.createElement("textarea");
       textArea.value = url;
@@ -468,12 +389,12 @@ const App = () => {
           </form>
 
           <div className="mt-8 bg-purple-50 p-4 rounded-xl text-left border border-purple-100">
-            <h3 className="text-xs font-bold text-purple-700 mb-2 flex items-center gap-1"><Info size={14}/> 처음 오셨나요?</h3>
+            <h3 className="text-xs font-bold text-purple-700 mb-2 flex items-center gap-1"><Info size={14}/> 로컬 저장소 모드</h3>
             <ul className="text-xs text-slate-600 space-y-1 list-disc list-inside">
-              <li>원하는 <strong>채널명</strong>을 입력하면 즉시 생성됩니다.</li>
-              <li>초기 관리자 비밀번호는 <strong>0000</strong>입니다.</li>
-              <li>접속 후 자물쇠(🔒)를 눌러 <strong>비밀번호를 변경</strong>하세요.</li>
-              <li>우측 상단 <strong>공유 버튼</strong>으로 시청자를 초대하세요.</li>
+              <li>이 모드는 <strong>서버 없이</strong> 브라우저에 데이터를 저장합니다.</li>
+              <li>다른 기기와 데이터가 <strong>공유되지 않습니다.</strong></li>
+              <li>인터넷 연결 없이도 동작합니다.</li>
+              <li>초기 비밀번호는 <strong>0000</strong>입니다.</li>
             </ul>
           </div>
         </div>
@@ -490,8 +411,8 @@ const App = () => {
               <Users size={20} /> 시청자 목록
             </h2>
             <div className="flex items-center gap-2 mt-1">
-              <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-400'}`}></span>
-              <p className="text-xs opacity-80">{isOnline ? '실시간 동기화 중' : '오프라인'}</p>
+              <span className={`w-2 h-2 rounded-full bg-blue-400`}></span>
+              <p className="text-xs opacity-80">로컬 저장소 사용 중</p>
             </div>
           </div>
         </div>
